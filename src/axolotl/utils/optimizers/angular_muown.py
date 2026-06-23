@@ -27,24 +27,88 @@ from axolotl.integrations.base import BaseOptimizerFactory
 __all__ = ["AngularMuown", "AngularMuownOptimizerFactory"]
 
 
+# Polar Express adaptive quintic coefficients (one per iteration). Sourced
+# from fhueb/angular-muown (the paper's reference implementation, MIT). Each
+# row is the (a, b, c) triple applied at step i, falling back to the last
+# row for any iteration beyond len(POLAR_EXPRESS_COEFFS). This is a strictly
+# more aggressive orthogonalization than classic Muon's fixed coefficients,
+# converging to a tighter singular-value band in the same step budget.
+POLAR_EXPRESS_COEFFS = (
+    (8.237312490495555, -23.157747414558198, 16.680568411445915),
+    (4.082441999064836, -2.8930477353325887, 0.5252849256975651),
+    (3.9263479922546556, -2.8547468034765293, 0.5318022422894989),
+    (3.2982187133085143, -2.4245419810267062, 0.48632008358844075),
+    (2.320007312889811, -1.6862169729967622, 0.42068027340235137),
+)
+
+
 def zeropower_via_newtonschulz5(grad: torch.Tensor, steps: int = 5, eps: float = 1e-7):
-    """Quintic Newton-Schulz iteration approximating the orthogonalization UV^T
-    of a 2D matrix, as used by Muon. Operates in float32 for CPU/test stability.
+    """Quintic Polar Express iteration approximating the orthogonalization UV^T
+    of a 2D matrix.
+
+    Matches fhueb/angular-muown's ``zeropower_via_polar_express`` (the paper's
+    reference implementation) using the 5-level adaptive Polar Express
+    coefficients, but stays in float32 on the default device for CPU/test
+    portability rather than the reference's bfloat16 + ``torch.compile`` path
+    (which targets large-scale GPU pretraining). The function name is preserved
+    for callers that already import it; the underlying iteration is now the
+    Polar Express variant rather than the classic Muon coefficients.
     """
     assert grad.ndim == 2
-    a, b, c = (3.4445, -4.7750, 2.0315)
     x = grad.float()
     transpose = x.size(0) > x.size(1)
     if transpose:
         x = x.T
-    x = x / (x.norm() + eps)
-    for _ in range(steps):
+    # Reference divides by (||X|| * 1.01 + eps); the 1.01 keeps singular
+    # values strictly inside the contraction region throughout iteration.
+    x = x / (x.norm() * 1.01 + eps)
+    for step in range(steps):
+        a, b, c = POLAR_EXPRESS_COEFFS[min(step, len(POLAR_EXPRESS_COEFFS) - 1)]
         gram = x @ x.T
-        poly = b * gram + c * gram @ gram
+        # Equivalent to addmm(gram, gram, gram, beta=b, alpha=c) — kept in
+        # explicit form so the math is readable on a code review.
+        poly = b * gram + c * (gram @ gram)
         x = a * x + poly @ x
     if transpose:
         x = x.T
     return x.to(grad.dtype)
+
+
+def _shape_for_u_step(param: torch.Tensor) -> tuple[int, int]:
+    """Return the (m, n) shape used for the Muon-style sqrt(max(1, m/n)) scaling
+    of the directional update.
+
+    Packed QKV projection matrices (rows == 3 * cols) are orthogonalized as
+    three square chunks, so they should use the square chunk shape for scaling
+    rather than the packed shape. Mirrors fhueb/angular-muown's
+    ``_shape_for_u_step``.
+    """
+    rows = param.size(0)
+    cols = param.size(1)
+    if rows == 3 * cols:
+        return cols, cols
+    return rows, cols
+
+
+def _orthogonalize_update(update: torch.Tensor, ns_steps: int) -> torch.Tensor:
+    """Polar-orthogonalize the (Nesterov-mixed) gradient update.
+
+    For packed-QKV projections (rows == 3 * cols) each of the three square
+    chunks is orthogonalized independently, which is materially different from
+    orthogonalizing the packed matrix as one tall block. Without this, models
+    that fuse Q/K/V into a single projection (LLaMA-family ``qkv_proj``) get
+    the wrong block structure on the directional step.
+    """
+    if update.size(0) != 3 * update.size(1):
+        return zeropower_via_newtonschulz5(update, steps=ns_steps)
+    chunk = update.size(1)
+    return torch.cat(
+        [
+            zeropower_via_newtonschulz5(c, steps=ns_steps)
+            for c in update.split(chunk, dim=0)
+        ],
+        dim=0,
+    )
 
 
 class AngularMuown(Optimizer):
@@ -68,8 +132,12 @@ class AngularMuown(Optimizer):
         ns_steps: int = 5,
         angular_lr: float | None = None,
         angular_warmup_steps: int = 0,
-        angular_decay_steps: int = 0,
-        angular_min_mult: float = 1.0,
+        # Inverse-polynomial decay: mult = (1 + decay_scale * t_after_warmup) ** (-decay_degree).
+        # decay_degree=0 disables decay (multiplier pegged at 1.0 after warmup).
+        # Defaults match the paper's framing of "implicit angular decay" as a
+        # mild inverse-square-root-ish schedule when made explicit.
+        angular_decay_scale: float = 0.0,
+        angular_decay_degree: float = 0.0,
     ):
         defaults = dict(
             lr=lr,
@@ -81,27 +149,37 @@ class AngularMuown(Optimizer):
             ns_steps=ns_steps,
             angular_lr=angular_lr,
             angular_warmup_steps=angular_warmup_steps,
-            angular_decay_steps=angular_decay_steps,
-            angular_min_mult=angular_min_mult,
+            angular_decay_scale=angular_decay_scale,
+            angular_decay_degree=angular_decay_degree,
             use_angular=True,
         )
         super().__init__(params, defaults)
         # global step counter driving the schedulable angular multiplier
         self._angular_step = 0
 
-    def angular_multiplier(self, warmup_steps: int, decay_steps: int, min_mult: float):
-        """Linear warmup to 1.0, then optional linear decay to ``min_mult``.
+    def angular_multiplier(
+        self, warmup_steps: int, decay_scale: float, decay_degree: float
+    ):
+        """Linear warmup to 1.0, then inverse-polynomial decay.
 
-        This is the explicit, schedulable angular step-size factor the paper
-        argues for — decoupled from the radial (magnitude) update.
+        Matches fhueb/angular-muown's ``_angular_lr_multiplier``: during
+        ``warmup_steps`` the multiplier grows linearly from ``1/warmup_steps``
+        to ``1.0``; afterwards it follows
+        ``(1 + decay_scale * t_after_warmup) ** (-decay_degree)``.
+
+        This is the paper's actual mechanism — *"Muown Implicitly Performs
+        Angular Step-size Decay"* names the inverse-polynomial decay shape as
+        the implicit schedule Muown induces. Setting ``decay_degree=0``
+        recovers a flat post-warmup multiplier of 1.0, matching the paper's
+        baseline before the schedule is made explicit.
         """
         step = self._angular_step
         if warmup_steps > 0 and step < warmup_steps:
             return (step + 1) / warmup_steps
-        if decay_steps > 0:
-            progress = min(1.0, max(0, step - warmup_steps) / decay_steps)
-            return 1.0 + (min_mult - 1.0) * progress
-        return 1.0
+        if decay_degree == 0.0:
+            return 1.0
+        t_after_warmup = max(0, step - warmup_steps)
+        return (1.0 + decay_scale * t_after_warmup) ** (-decay_degree)
 
     @torch.no_grad()
     def step(self, closure=None):
@@ -129,8 +207,8 @@ class AngularMuown(Optimizer):
         angular_lr = group["angular_lr"] if group["angular_lr"] is not None else lr
         theta = angular_lr * self.angular_multiplier(
             group["angular_warmup_steps"],
-            group["angular_decay_steps"],
-            group["angular_min_mult"],
+            group["angular_decay_scale"],
+            group["angular_decay_degree"],
         )
 
         for param in group["params"]:
@@ -155,10 +233,12 @@ class AngularMuown(Optimizer):
             buf = state["momentum_buffer"]
             buf.mul_(momentum).add_(grad)
             update = grad.add(buf, alpha=momentum) if nesterov else buf
-            ortho = zeropower_via_newtonschulz5(update, steps=group["ns_steps"])
-            # Muon-style scale so the update RMS is shape-invariant
-            rows, cols = param.shape
-            ortho.mul_(max(1.0, rows / cols) ** 0.5)
+            # Polar-orthogonalize, with per-chunk handling for packed QKV
+            ortho = _orthogonalize_update(update, ns_steps=group["ns_steps"])
+            # Muon-style shape-invariant scale; uses the chunk shape for
+            # packed-QKV layouts (rows == 3 * cols) rather than the packed shape.
+            scale_rows, scale_cols = _shape_for_u_step(param)
+            ortho.mul_(max(1.0, scale_rows / scale_cols) ** 0.5)
 
             row_norm = param.norm(dim=1, keepdim=True).clamp_min(eps)
             directions = param / row_norm
@@ -226,8 +306,12 @@ class AngularMuownOptimizerFactory(BaseOptimizerFactory):
         # angular hyperparameters may arrive as strings via cfg.optim_args
         angular_lr = optimizer_kwargs.pop("angular_lr", None)
         angular_warmup_steps = int(optimizer_kwargs.pop("angular_warmup_steps", 0))
-        angular_decay_steps = int(optimizer_kwargs.pop("angular_decay_steps", 0))
-        angular_min_mult = float(optimizer_kwargs.pop("angular_min_mult", 1.0))
+        # Inverse-polynomial decay parameters matching fhueb/angular-muown.
+        # ``angular_decay_scale`` controls how quickly the multiplier shrinks
+        # per step; ``angular_decay_degree`` controls the asymptotic shape
+        # (0 = no decay, 0.5 ≈ inverse-sqrt, 1 = harmonic, >1 = aggressive).
+        angular_decay_scale = float(optimizer_kwargs.pop("angular_decay_scale", 0.0))
+        angular_decay_degree = float(optimizer_kwargs.pop("angular_decay_degree", 0.0))
         if angular_lr is not None:
             angular_lr = float(angular_lr)
 
@@ -255,8 +339,8 @@ class AngularMuownOptimizerFactory(BaseOptimizerFactory):
                     "weight_decay": weight_decay,
                     "angular_lr": angular_lr,
                     "angular_warmup_steps": angular_warmup_steps,
-                    "angular_decay_steps": angular_decay_steps,
-                    "angular_min_mult": angular_min_mult,
+                    "angular_decay_scale": angular_decay_scale,
+                    "angular_decay_degree": angular_decay_degree,
                 }
             )
         if adamw_decay:

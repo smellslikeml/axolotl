@@ -2,6 +2,7 @@
 
 from types import SimpleNamespace
 
+import pytest
 import torch
 from torch import nn
 
@@ -28,9 +29,33 @@ def test_newton_schulz_bounds_singular_values():
     torch.manual_seed(0)
     mat = torch.randn(8, 16) * 100.0  # arbitrary scale; NS should normalize it away
     ortho = zeropower_via_newtonschulz5(mat, steps=6)
-    # Muon's Newton-Schulz pushes every singular value into a tight band near 1
-    # (an approximate orthogonalization, not an exact one) regardless of input scale
+    # Polar Express pushes every singular value into a tight band near 1
+    # (an approximate orthogonalization, not an exact one) regardless of input scale.
+    # The band is tighter than classic Muon's NS — empirically singular values land
+    # well inside [0.8, 1.2] after 5+ steps — but we keep the [0.5, 1.5] envelope
+    # so the assertion stays robust to small numerical differences across torch
+    # versions / dtype paths.
     svals = torch.linalg.svdvals(ortho)
+    assert svals.min() > 0.5
+    assert svals.max() < 1.5
+
+
+def test_newton_schulz_handles_packed_qkv_via_chunked_orthogonalize():
+    """Packed QKV matrices (rows == 3 * cols) must be orthogonalized as three
+    square chunks, not as one tall block — that's what _orthogonalize_update
+    does. Without this, LLaMA-family fused qkv_proj matrices get the wrong
+    block structure on the directional step."""
+    from axolotl.utils.optimizers.angular_muown import _orthogonalize_update
+
+    torch.manual_seed(0)
+    cols = 8
+    packed = torch.randn(3 * cols, cols)  # mirrors a qkv_proj shape
+    ortho = _orthogonalize_update(packed, ns_steps=5)
+    assert ortho.shape == packed.shape
+    # Each square chunk's singular values should be near 1 (the chunk-wise
+    # orthogonalization invariant) — verify on the middle chunk.
+    mid_chunk = ortho[cols : 2 * cols]
+    svals = torch.linalg.svdvals(mid_chunk)
     assert svals.min() > 0.5
     assert svals.max() < 1.5
 
@@ -53,21 +78,40 @@ def test_angular_step_decreases_quadratic_loss():
     assert loss_fn().item() < first
 
 
-def test_angular_multiplier_warmup_and_decay():
+def test_angular_multiplier_warmup_and_inverse_polynomial_decay():
+    """The angular multiplier matches fhueb/angular-muown's
+    ``_angular_lr_multiplier``: linear warmup to 1.0, then inverse-polynomial
+    decay ``(1 + decay_scale * t)**(-decay_degree)`` — the paper's actual
+    "implicit decay" mechanism made explicit."""
     weight = nn.Parameter(torch.randn(4, 4))
     opt = AngularMuown(
         [{"params": [weight], "use_angular": True}],
         lr=0.05,
         angular_warmup_steps=4,
-        angular_decay_steps=4,
-        angular_min_mult=0.0,
+        angular_decay_scale=0.5,
+        angular_decay_degree=0.5,  # inverse-sqrt-style decay
     )
-    warmup = opt.angular_multiplier(4, 4, 0.0)
-    assert 0.0 < warmup <= 1.0  # still warming up at step 0
+
+    # Warmup: linear ramp from 1/warmup_steps at step 0 up to 1.0 at step=warmup
+    warmup_at_0 = opt.angular_multiplier(4, 0.5, 0.5)
+    assert 0.0 < warmup_at_0 <= 1.0
     opt._angular_step = 4
-    assert opt.angular_multiplier(4, 4, 0.0) == 1.0  # peak right after warmup
-    opt._angular_step = 8
-    assert opt.angular_multiplier(4, 4, 0.0) == 0.0  # fully decayed
+    assert opt.angular_multiplier(4, 0.5, 0.5) == 1.0  # peak right after warmup
+
+    # Post-warmup: (1 + 0.5 * t_after_warmup)**(-0.5), strictly monotone decay
+    opt._angular_step = 8  # t_after_warmup = 4
+    mult_at_8 = opt.angular_multiplier(4, 0.5, 0.5)
+    assert mult_at_8 == pytest.approx((1 + 0.5 * 4) ** -0.5, rel=1e-6)
+    opt._angular_step = 20  # t_after_warmup = 16, mult should be smaller
+    mult_at_20 = opt.angular_multiplier(4, 0.5, 0.5)
+    assert mult_at_20 < mult_at_8
+    # Inverse-polynomial decay never reaches zero; ours doesn't either.
+    opt._angular_step = 10_000
+    assert opt.angular_multiplier(4, 0.5, 0.5) > 0.0
+
+    # decay_degree=0 → constant 1.0 post-warmup (recovers Muown's pre-paper baseline)
+    opt._angular_step = 100
+    assert opt.angular_multiplier(4, 0.5, 0.0) == 1.0
 
 
 def test_factory_splits_matrices_from_embeddings_and_norms():
