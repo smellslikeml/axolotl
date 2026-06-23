@@ -178,7 +178,7 @@ class TRLConfig(BaseModel):
     loss_type: str | None = Field(
         default=None,
         json_schema_extra={
-            "description": "Loss formulation to use. Supported values: grpo, bnpo, dr_grpo."
+            "description": "Loss formulation to use. Supported values: grpo, bnpo, dr_grpo, drpo (divergence-regularized trust region)."
         },
     )
     mask_truncated_completions: bool = Field(

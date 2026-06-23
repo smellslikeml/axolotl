@@ -88,6 +88,7 @@ try:
 except ImportError:
     _fused_selective_log_softmax = None
 
+from axolotl.core.trainers.grpo.divergence_regularized_loss import drpo_per_token_loss
 from axolotl.utils.logging import get_logger
 
 # ---------------------------------------------------------------------------
@@ -3161,6 +3162,18 @@ class AsyncGRPOTrainer(GRPOTrainer):
             )
             soft = torch.sigmoid(temps * (coef_1 - 1)) * 4 / temps
             per_token_loss = -soft * advantages
+        elif self.loss_type == "drpo":
+            # DRPO regularization threshold: 12.5 by default per paper §4.
+            # mu_weighted=True (default) activates DRPO's §3 token-adaptive
+            # ε_t = ε / μ; False degrades to plain SPO (the baseline DRPO
+            # improves on) and matches verl's `spo` loss mode for ablation.
+            per_token_loss = drpo_per_token_loss(
+                coef_1,
+                advantages,
+                old_per_token_logps,
+                epsilon=getattr(self.args, "drpo_epsilon", 12.5),
+                mu_weighted=getattr(self.args, "drpo_mu_weighted", True),
+            )
         else:
             raise ValueError(f"Unknown loss type: {self.loss_type}")
 
@@ -3187,7 +3200,7 @@ class AsyncGRPOTrainer(GRPOTrainer):
             self.current_gradient_accumulation_steps if mode == "train" else 1.0
         )
 
-        if self.loss_type in ("grpo", "sapo"):
+        if self.loss_type in ("grpo", "sapo", "drpo"):
             loss = (
                 (per_token_loss * mask).sum(-1) / mask.sum(-1).clamp(min=1.0)
             ).mean() / normalizer
