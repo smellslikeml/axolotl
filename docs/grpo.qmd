@@ -431,6 +431,20 @@ Use `token` level IS. Sequence-level has numerical issues with Liger's chunked c
 For detailed coverage of IS modes (`token_mask`, `token_truncate`, etc.), capping, and bias-corrected KL, see [vLLM Serving — IS Correction](vllm_serving.qmd#sec-weight-sync).
 
 
+## Loss Types
+
+The `loss_type` knob selects the policy-gradient surrogate. `grpo` (default), `bnpo`, and `dr_grpo` use PPO-style ratio clipping. `drpo` ("Rethinking the Divergence Regularization in LLM RL", [arxiv 2606.09821](https://arxiv.org/abs/2606.09821)) instead replaces the hard clip with a smooth, advantage-weighted quadratic divergence penalty and a token-adaptive trust region.
+
+```yaml
+trl:
+  loss_type: drpo
+  drpo_epsilon: 12.5         # regularization threshold (paper §4)
+  drpo_mu_weighted: true     # token-adaptive trust region eps_t = eps / mu (paper §3)
+```
+
+`drpo` is only implemented in the async GRPO trainer. Larger `drpo_epsilon` weakens the regularization. Setting `drpo_mu_weighted: false` removes the per-token `mu` factor, degrading DRPO to the plain SPO baseline.
+
+
 ## Scaling
 
 ### FP8 training
@@ -533,7 +547,9 @@ All GRPO-specific options live under the `trl:` key in your config. Standard tra
 | `num_iterations` | int | `null` | Iterations per batch (mu in the GRPO paper) |
 | `epsilon` | float | `null` | PPO clipping lower bound |
 | `epsilon_high` | float | `null` | PPO clipping upper bound |
-| `loss_type` | str | `null` | Loss formulation: `grpo`, `bnpo`, or `dr_grpo` |
+| `loss_type` | str | `null` | Loss formulation: `grpo`, `bnpo`, `dr_grpo`, or `drpo` |
+| `drpo_epsilon` | float | `12.5` | DRPO regularization threshold (only used with `loss_type: drpo`) |
+| `drpo_mu_weighted` | bool | `true` | Enable DRPO token-adaptive trust region `eps_t = eps / mu` (only used with `loss_type: drpo`) |
 | `scale_rewards` | bool | `true` | Normalize rewards by standard deviation |
 | `mask_truncated_completions` | bool | `false` | Exclude truncated completions from loss |
 

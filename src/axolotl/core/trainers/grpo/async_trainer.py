@@ -185,6 +185,16 @@ class AsyncGRPOConfig(GRPOConfig):
         metadata={"help": "Apply IS correction to KL divergence term."},
     )
 
+    # --- DRPO divergence-regularized loss (loss_type=drpo) ---
+    drpo_epsilon: float = field(
+        default=12.5,
+        metadata={"help": "DRPO regularization threshold (paper §4 uses 12.5)."},
+    )
+    drpo_mu_weighted: bool = field(
+        default=True,
+        metadata={"help": "Enable DRPO token-adaptive trust region eps_t = eps / mu (paper §3)."},
+    )
+
 
 # ---------------------------------------------------------------------------
 # Data Producer Protocol (standalone — no transformers branch needed)
@@ -3171,8 +3181,8 @@ class AsyncGRPOTrainer(GRPOTrainer):
                 coef_1,
                 advantages,
                 old_per_token_logps,
-                epsilon=getattr(self.args, "drpo_epsilon", 12.5),
-                mu_weighted=getattr(self.args, "drpo_mu_weighted", True),
+                epsilon=self.args.drpo_epsilon,
+                mu_weighted=self.args.drpo_mu_weighted,
             )
         else:
             raise ValueError(f"Unknown loss type: {self.loss_type}")

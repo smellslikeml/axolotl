@@ -181,6 +181,18 @@ class TRLConfig(BaseModel):
             "description": "Loss formulation to use. Supported values: grpo, bnpo, dr_grpo, drpo (divergence-regularized trust region)."
         },
     )
+    drpo_epsilon: float | None = Field(
+        default=None,
+        json_schema_extra={
+            "description": "DRPO regularization threshold (paper §4 uses 12.5). Only used when loss_type=drpo. Larger values weaken the divergence regularization."
+        },
+    )
+    drpo_mu_weighted: bool | None = Field(
+        default=None,
+        json_schema_extra={
+            "description": "Enable DRPO's token-adaptive trust region eps_t = eps / mu (paper §3). Only used when loss_type=drpo. False degrades to plain SPO."
+        },
+    )
     mask_truncated_completions: bool = Field(
         default=False,
         json_schema_extra={

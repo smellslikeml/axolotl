@@ -181,6 +181,8 @@ class TestDrpoWiredIntoTrainer:
         assert '("grpo", "sapo", "drpo")' in src
         # Argument shape must match the new signature: epsilon + mu_weighted.
         # Pins the wire-in invariant via source inspection (so we don't need
-        # the full conftest stack to verify the contract).
-        assert "epsilon=getattr(self.args" in src
-        assert "mu_weighted=getattr(self.args" in src
+        # the full conftest stack to verify the contract). The knobs are real
+        # validated config fields (schemas/trl.py → AsyncGRPOConfig), so the
+        # trainer reads them as attributes rather than getattr defaults.
+        assert "epsilon=self.args.drpo_epsilon" in src
+        assert "mu_weighted=self.args.drpo_mu_weighted" in src

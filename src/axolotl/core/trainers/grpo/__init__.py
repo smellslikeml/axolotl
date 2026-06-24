@@ -120,6 +120,10 @@ class GRPOStrategy:
 
         if trl.loss_type is not None:
             grpo_args_kwargs["loss_type"] = trl.loss_type
+        if trl.drpo_epsilon is not None:
+            grpo_args_kwargs["drpo_epsilon"] = trl.drpo_epsilon
+        if trl.drpo_mu_weighted is not None:
+            grpo_args_kwargs["drpo_mu_weighted"] = trl.drpo_mu_weighted
         if trl.mask_truncated_completions is not None:
             grpo_args_kwargs["mask_truncated_completions"] = (
                 trl.mask_truncated_completions
