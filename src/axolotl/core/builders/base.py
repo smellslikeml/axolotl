@@ -341,6 +341,13 @@ class TrainerBuilderBase(abc.ABC):
                 _, device_mesh = build_parallelism_config(self.cfg)
                 if device_mesh is not None:
                     optimizer_kwargs["device_mesh"] = device_mesh
+            elif self.cfg.optimizer == "angular_muown":
+                from axolotl.utils.optimizers.angular_muown import (
+                    AngularMuownOptimizerFactory,
+                )
+
+                optimizer_cls = AngularMuownOptimizerFactory
+                optimizer_kwargs.update(adam_kwargs)
             elif self.cfg.optimizer == "optimi_adamw":
                 from optimi import AdamW
 
