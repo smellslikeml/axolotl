@@ -32,6 +32,7 @@ class RLType(str, Enum):
     GDPO = "gdpo"
     GRPO = "grpo"
     IPO = "ipo"
+    ODPO = "odpo"
     ORPO = "orpo"
     KTO = "kto"
     SIMPO = "simpo"

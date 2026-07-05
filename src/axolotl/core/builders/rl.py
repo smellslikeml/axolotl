@@ -72,6 +72,12 @@ class HFRLTrainerBuilder(TrainerBuilderBase):
             trainer_cls = DPOStrategy.get_trainer_class()
             trainer_cls_args.append(self.model_ref)
 
+        elif self.cfg.rl is RLType.ODPO:
+            from axolotl.core.trainers.dpo.odpo import ODPOStrategy
+
+            trainer_cls = ODPOStrategy.get_trainer_class()
+            trainer_cls_args.append(self.model_ref)
+
         elif self.cfg.rl is RLType.ORPO:
             trainer_cls = AxolotlORPOTrainer
         elif self.cfg.rl is RLType.KTO:
@@ -194,7 +200,7 @@ class HFRLTrainerBuilder(TrainerBuilderBase):
                     "multi_objective_aggregation", "normalize_then_sum"
                 )
 
-        elif self.cfg.rl in [RLType.DPO, RLType.IPO]:
+        elif self.cfg.rl in [RLType.DPO, RLType.IPO, RLType.ODPO]:
             training_args_cls = AxolotlDPOConfig
             training_args_kwargs.update(DPOStrategy.set_training_args_kwargs(self.cfg))
 
@@ -232,14 +238,15 @@ class HFRLTrainerBuilder(TrainerBuilderBase):
         """Build a data collator for preference-tuning trainers.
 
         Returns None for RL types that provide their own collator (e.g. GRPO,
-        KTO), letting the trainer construct its default. For DPO/IPO/ORPO/SIMPO
-        returns an ``AxolotlDPODataCollatorWithPadding`` when
-        ``pad_to_multiple_of`` is set, otherwise None (so the trainer
+        KTO), letting the trainer construct its default. For
+        DPO/IPO/ODPO/ORPO/SIMPO returns an ``AxolotlDPODataCollatorWithPadding``
+        when ``pad_to_multiple_of`` is set, otherwise None (so the trainer
         falls back to the TRL default).
         """
         if self.cfg.rl not in (
             RLType.DPO,
             RLType.IPO,
+            RLType.ODPO,
             RLType.ORPO,
             RLType.SIMPO,
         ):
@@ -329,7 +336,10 @@ class HFRLTrainerBuilder(TrainerBuilderBase):
                 )
         if self.cfg.fsdp_config or self.cfg.fsdp:
             ensure_dtype(trainer.model, dtype=self.cfg.torch_dtype)
-            if self.cfg.rl in [RLType.DPO, RLType.IPO] and trainer.ref_model:
+            if (
+                self.cfg.rl in [RLType.DPO, RLType.IPO, RLType.ODPO]
+                and trainer.ref_model
+            ):
                 ensure_dtype(trainer.ref_model, dtype=self.cfg.torch_dtype)
 
         trainer = self.hook_post_create_trainer(trainer)

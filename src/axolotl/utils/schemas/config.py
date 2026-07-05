@@ -307,6 +307,15 @@ class AxolotlInputConfig(
         },
     )
     dpo_label_smoothing: float | None = None
+    dpo_offset: float | None = Field(
+        default=None,
+        json_schema_extra={
+            "description": (
+                "ODPO offset (arxiv:2402.10571): margin the policy log-reward "
+                "must exceed on chosen-over-rejected. 0.0 = plain DPO."
+            )
+        },
+    )
     precompute_ref_log_probs: bool | None = Field(
         default=None,
         json_schema_extra={
