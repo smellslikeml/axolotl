@@ -14,3 +14,5 @@ class AxolotlDPOConfig(AxolotlTrainingMixins, DPOConfig):
     """
     DPO config for DPO training
     """
+
+    dpo_offset: float = 0.0

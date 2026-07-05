@@ -33,6 +33,10 @@ class DPOStrategy:
         # Label smoothing is not compatible with IPO
         if cfg.rl is RLType.DPO and cfg.dpo_label_smoothing:
             training_args_kwargs["label_smoothing"] = cfg.dpo_label_smoothing
+
+        if cfg.dpo_offset is not None:
+            training_args_kwargs["dpo_offset"] = cfg.dpo_offset
+
         training_args_kwargs["max_length"] = cfg.sequence_len
         if cfg.dpo_use_weighting is not None:
             training_args_kwargs["use_weighting"] = cfg.dpo_use_weighting

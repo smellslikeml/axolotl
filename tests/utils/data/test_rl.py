@@ -104,6 +104,15 @@ class TestDropLongSequences(unittest.TestCase):
         )
         self.assertFalse(result)
 
+    def test_odpo_uses_dpo_logic(self):
+        # ODPO (DPO with an offset, arxiv:2402.10571) reuses the DPO
+        # preference-pair data path.
+        sample = _make_dpo_sample(prompt_len=5, chosen_len=10, rejected_len=2)
+        result = _drop_long_sequences(
+            sample, RLType.ODPO, self.tokenizer, sequence_len=10
+        )
+        self.assertFalse(result)
+
     def test_orpo_uses_dpo_logic(self):
         sample = _make_dpo_sample(prompt_len=3, chosen_len=2, rejected_len=2)
         result = _drop_long_sequences(

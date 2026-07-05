@@ -476,7 +476,7 @@ class ModelLoader:
             # over it, it just wants the LoRA / PEFT config.
             if (
                 self.cfg.adapter
-                and self.cfg.rl in [RLType.DPO, RLType.IPO, RLType.KTO]
+                and self.cfg.rl in [RLType.DPO, RLType.IPO, RLType.ODPO, RLType.KTO]
                 and not self.cfg.merge_lora
             ):
                 _, lora_config = load_adapter(
